@@ -15,14 +15,28 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
+    raise RuntimeError("BOT_TOKEN is not set")
 
 LOCAL_TZ = timezone(timedelta(hours=0))
 DB_PATH = os.getenv("DB_PATH", "finances.db")
 
+# ✅ Обновлённые категории (добавили: Бензин, Мойка, Офис, Спортзал)
 CATEGORIES: List[str] = [
-    "Сигареты","Кофе","Продукты","Ozon","WB",
-    "Жрала не дома","Beauty","Бытовая химия","Такси","Квартира","Иное"
+    "Сигареты",
+    "Кофе",
+    "Продукты",
+    "Ozon",
+    "WB",
+    "Жрала не дома",
+    "Beauty",
+    "Бытовая химия",
+    "Такси",
+    "Квартира",
+    "Бензин",
+    "Мойка",
+    "Офис",
+    "Спортзал",
+    "Иное",
 ]
 
 def db():
