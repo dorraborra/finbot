@@ -20,7 +20,7 @@ if not BOT_TOKEN:
 LOCAL_TZ = timezone(timedelta(hours=0))
 DB_PATH = os.getenv("DB_PATH", "finances.db")
 
-# Пары: (красивый лейбл с эмодзи, «чистое» имя для БД)
+# (красивый лейбл, «чистое» имя для БД)
 CATEGORY_OPTIONS: List[Tuple[str, str]] = [
     ("🚬 Сигареты", "Сигареты"),
     ("☕ Кофе", "Кофе"),
@@ -41,9 +41,7 @@ CATEGORY_OPTIONS: List[Tuple[str, str]] = [
 RAW_CATEGORIES: List[str] = [r for _, r in CATEGORY_OPTIONS]
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; return conn
 
 def init_db():
     with closing(db()) as conn, conn:
@@ -58,7 +56,8 @@ def inline_main_menu():
     kb.button(text="➕ Добавить", callback_data="menu:add")
     kb.button(text="📊 Статистика", callback_data="menu:stats")
     kb.button(text="📁 Экспорт CSV", callback_data="menu:export")
-    kb.adjust(2,1)
+    kb.button(text="ℹ️ Помощь", callback_data="menu:help")
+    kb.adjust(2,2)
     return kb.as_markup()
 
 def inline_categories(page: int = 0, per_row: int = 2, page_size: int = 10):
@@ -96,10 +95,15 @@ class AddFlow(StatesGroup):
 
 router = Router()
 
+# новое интро
 WELCOME = (
-    "✨ <b>Фин-бот</b>\n"
-    "Кидай сумму — спрошу категорию и всё запишу.\n\n"
-    "💰 Быстрые действия:"
+    "🦩 <b>Flamingo Money</b>\n"
+    "Твой лёгкий учёт расходов: кидай сумму — я спрошу категорию и всё запишу.\n\n"
+    "💡 Что умею:\n"
+    "• 📊 Статистика по дням/неделям/месяцу\n"
+    "• 📁 Экспорт в CSV одним нажатием\n"
+    "• ➕ Быстрое добавление трат\n\n"
+    "Выбери действие ниже:"
 )
 
 def period_bounds(kind: str):
@@ -165,13 +169,27 @@ async def cb_export(cb: CallbackQuery):
     await export_csv(cb.message)
     await cb.answer()
 
+@router.callback_query(F.data == "menu:help")
+async def cb_help(cb: CallbackQuery):
+    text = (
+        "ℹ️ <b>Как пользоваться</b>\n\n"
+        "1) Отправь число — это сумма траты (например: <b>390</b>).\n"
+        "2) Выбери категорию из списка.\n"
+        "3) Готово! Запись попадёт в статистику и экспорт.\n\n"
+        "Команды:\n"
+        "• /menu — главное меню\n"
+        "• /stats — выбор периода статистики\n"
+        "• /export — выгрузка CSV\n"
+        "• /start — перезапуск приветствия"
+    )
+    await cb.message.answer(text, parse_mode="HTML", reply_markup=inline_main_menu())
+    await cb.answer()
+
 @router.callback_query(F.data.startswith("page:"))
 async def cat_page(cb: CallbackQuery, state: FSMContext):
     page = int(cb.data.split(":", 1)[1])
     cats, nav = inline_categories(page=page)
-    await cb.message.edit_text(
-        "Выбери категорию:",
-    )
+    await cb.message.edit_text("Выбери категорию:")
     if nav:
         await cb.message.edit_reply_markup(reply_markup=cats)
         await cb.message.answer("Навигация:", reply_markup=nav)
@@ -233,29 +251,26 @@ async def picked_category(cb: CallbackQuery, state: FSMContext):
 async def stats_cmd(message: Message):
     await message.answer("Выбери период:", reply_markup=stats_inline_kb())
 
+def build_stats_text(title: str, total: float, rows):
+    max_val = max((r["total"] or 0) for r in rows) or 1.0
+    label_by_raw = {raw: lbl for (lbl, raw) in CATEGORY_OPTIONS}
+    lines = [f"📊 <b>{title}</b>\nИтого: <b>{total:g}</b>\n"]
+    for r in rows:
+        raw = r["category"]
+        lbl = label_by_raw.get(raw, raw)
+        val = float(r["total"] or 0)
+        lines.append(f"{lbl} — {val:g}\n{bar(val, max_val)}")
+    return "\n".join(lines)
+
 @router.callback_query(F.data.startswith("stats:"))
 async def stats_cb(cb: CallbackQuery):
     kind = cb.data.split(":", 1)[1]
     title, start, end = period_bounds(kind)
     total, rows = fetch_stats(cb.from_user.id, start, end)
-
     if not rows:
         await cb.message.answer(f"📊 {title}\nНет расходов", reply_markup=inline_main_menu())
-        await cb.answer()
-        return
-
-    max_val = max((r["total"] or 0) for r in rows) or 1.0
-    lines = [f"📊 <b>{title}</b>\nИтого: <b>{total:g}</b>\n"]
-    # сопоставим «чистое» имя с красивым лейблом
-    label_by_raw = {raw: lbl for (lbl, raw) in CATEGORY_OPTIONS}
-
-    for r in rows:
-        raw = r["category"]
-        lbl = label_by_raw.get(raw, raw)
-        val = float(r["total"] or 0)
-        lines.append(f"{lbl} — {val:g}  {bar(val, max_val)}")
-
-    await cb.message.answer("\n".join(lines), parse_mode="HTML", reply_markup=inline_main_menu())
+    else:
+        await cb.message.answer(build_stats_text(title, total, rows), parse_mode="HTML", reply_markup=inline_main_menu())
     await cb.answer()
 
 @router.message(Command("export"))
