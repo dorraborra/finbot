@@ -18,20 +18,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
-# при необходимости можно сменить часовой пояс на свой
 LOCAL_TZ = timezone(timedelta(hours=0))
 DB_PATH = os.getenv("DB_PATH", "finances.db")
 
 # ---------- Категории ----------
-# первый элемент — красивый лейбл с эмодзи для интерфейса
-# второй элемент — "сырое" имя категории, которое хранится в базе
 CATEGORY_OPTIONS: List[Tuple[str, str]] = [
     ("🚬 Сигареты", "Сигареты"),
     ("☕ Кофе", "Кофе"),
     ("🛒 Продукты", "Продукты"),
     ("📦 Ozon", "Ozon"),
     ("🛍 WB", "WB"),
-    ("🍔 Было лень готовить", "Жрала не дома"),  # <-- исправлено: лейбл, сырой ключ прежний
+    ("🍔 Было лень готовить", "Жрала не дома"),  # лейбл обновлён, ключ в БД прежний
     ("💄 Beauty", "Beauty"),
     ("🧽 Бытовая химия", "Бытовая химия"),
     ("🚕 Такси", "Такси"),
@@ -59,6 +56,35 @@ def init_db():
         )
 
 # ---------- Клавиатуры ----------
+def categories_kb(page: int = 0, per_row: int = 2, page_size: int = 10):
+    """
+    ОДНА клавиатура: сначала категории (несколько рядов), затем ряд навигации.
+    """
+    start = page * page_size
+    end = start + page_size
+    slice_ = CATEGORY_OPTIONS[start:end]
+
+    kb = InlineKeyboardBuilder()
+    # категории
+    for idx, (label, _) in enumerate(slice_, start=start):
+        kb.button(text=label, callback_data=f"pick:{idx}")
+    kb.adjust(per_row)
+
+    # навигация
+    pages = (len(CATEGORY_OPTIONS) + page_size - 1) // page_size
+    if pages > 1:
+        nav = InlineKeyboardBuilder()
+        if page > 0:
+            nav.button(text="⬅️ Назад", callback_data=f"page:{page-1}")
+        nav.button(text=f"Стр. {page+1}/{pages}", callback_data="noop")
+        if page < pages - 1:
+            nav.button(text="Вперёд ➡️", callback_data=f"page:{page+1}")
+        nav.adjust(3)
+        # приклеиваем навигационный ряд в конец основной клавиатуры
+        kb.row(*nav.buttons)
+
+    return kb.as_markup()
+
 def inline_main_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Добавить", callback_data="menu:add")
@@ -68,28 +94,6 @@ def inline_main_menu():
     kb.button(text="🧹 Сбросить мои данные", callback_data="menu:reset")
     kb.adjust(2, 2, 1)
     return kb.as_markup()
-
-def inline_categories(page: int = 0, per_row: int = 2, page_size: int = 10):
-    start = page * page_size
-    end = start + page_size
-    slice_ = CATEGORY_OPTIONS[start:end]
-
-    kb = InlineKeyboardBuilder()
-    for idx, (label, _) in enumerate(slice_, start=start):
-        kb.button(text=label, callback_data=f"pick:{idx}")
-    kb.adjust(per_row)
-
-    pages = (len(CATEGORY_OPTIONS) + page_size - 1) // page_size
-    nav = InlineKeyboardBuilder()
-    if pages > 1:
-        if page > 0:
-            nav.button(text="⬅️ Назад", callback_data=f"page:{page-1}")
-        nav.button(text=f"Стр. {page+1}/{pages}", callback_data="noop")
-        if page < pages - 1:
-            nav.button(text="Вперёд ➡️", callback_data=f"page:{page+1}")
-        nav.adjust(3)
-        return kb.as_markup(), nav.as_markup()
-    return kb.as_markup(), None
 
 def stats_inline_kb():
     kb = InlineKeyboardBuilder()
@@ -156,8 +160,6 @@ def bar(value: float, max_value: float, width: int = 14) -> str:
     return "█" * filled + "░" * (width - filled)
 
 # ---------- Хэндлеры ----------
-from aiogram.filters import CommandObject
-
 @router.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
     await message.answer(WELCOME, reply_markup=inline_main_menu(), parse_mode="HTML")
@@ -231,15 +233,28 @@ async def myreset_confirm(cb: CallbackQuery):
 async def got_amount(message: Message, state: FSMContext):
     amount = float(message.text.replace(",", "."))
     await state.update_data(amount=amount)
-    cats, nav = inline_categories(page=0)
-    await message.answer(f"Ок, <b>{amount:g}</b>. Выбери категорию:", parse_mode="HTML", reply_markup=cats)
-    if nav:
-        await message.answer("Навигация:", reply_markup=nav)
+    await message.answer(
+        f"Ок, <b>{amount:g}</b>. Выбери категорию:",
+        parse_mode="HTML",
+        reply_markup=categories_kb(page=0)
+    )
     await state.set_state(AddFlow.waiting_category)
 
 @router.message(AddFlow.waiting_amount)
 async def must_number(message: Message):
     await message.answer("Отправь число, например: 390")
+
+# навигация по страницам категорий (редактирует ту же клавиатуру)
+@router.callback_query(F.data.startswith("page:"))
+async def page_cb(cb: CallbackQuery):
+    page = int(cb.data.split(":", 1)[1])
+    await cb.message.edit_reply_markup(reply_markup=categories_kb(page=page))
+    await cb.answer()
+
+# глушилка для центральной кнопки "Стр. x/y"
+@router.callback_query(F.data == "noop")
+async def noop_cb(cb: CallbackQuery):
+    await cb.answer()
 
 @router.callback_query(AddFlow.waiting_category, F.data.startswith("pick:"))
 async def picked_category(cb: CallbackQuery, state: FSMContext):
