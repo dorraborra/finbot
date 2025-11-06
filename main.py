@@ -305,3 +305,33 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# ====== /reset_me: удалить ТОЛЬКО мои траты ======
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+@router.message(Command("reset_me"))
+async def reset_me_ask(message: Message):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Да, удалить мои траты", callback_data="reset:confirm")
+    kb.button(text="Отмена", callback_data="reset:cancel")
+    kb.adjust(1)
+    await message.answer(
+        "⚠️ Уверена, что хочешь удалить все свои траты?\n"
+        "Это действие <b>нельзя отменить</b>.",
+        parse_mode="HTML",
+        reply_markup=kb.as_markup()
+    )
+
+@router.callback_query(F.data == "reset:cancel")
+async def reset_cancel(cb: CallbackQuery):
+    await cb.message.answer("Отменено ✅", reply_markup=inline_main_menu())
+    await cb.answer()
+
+@router.callback_query(F.data == "reset:confirm")
+async def reset_confirm(cb: CallbackQuery):
+    from contextlib import closing
+    with closing(db()) as conn, conn:
+        conn.execute("DELETE FROM expenses WHERE user_id=?", (cb.from_user.id,))
+    await cb.message.answer("🧹 Готово! Все твои траты удалены.", reply_markup=inline_main_menu())
+    await cb.answer()
+# ====== /reset_me конец ======
