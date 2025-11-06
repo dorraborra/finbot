@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
 from typing import List, Tuple
+import random
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
@@ -40,6 +41,7 @@ CATEGORY_OPTIONS: List[Tuple[str, str]] = [
     ("📁 Иное", "Иное"),
 ]
 RAW_CATEGORIES: List[str] = [r for _, r in CATEGORY_OPTIONS]
+LABEL_BY_RAW = {raw: label for (label, raw) in CATEGORY_OPTIONS}
 
 # ---------- База данных ----------
 def db():
@@ -58,19 +60,17 @@ def init_db():
 # ---------- Клавиатуры ----------
 def categories_kb(page: int = 0, per_row: int = 2, page_size: int = 10):
     """
-    ОДНА клавиатура: сначала категории (несколько рядов), затем ряд навигации.
+    ОДНА клавиатура: категории + ряд навигации внизу.
     """
     start = page * page_size
     end = start + page_size
     slice_ = CATEGORY_OPTIONS[start:end]
 
     kb = InlineKeyboardBuilder()
-    # категории
     for idx, (label, _) in enumerate(slice_, start=start):
         kb.button(text=label, callback_data=f"pick:{idx}")
     kb.adjust(per_row)
 
-    # навигация
     pages = (len(CATEGORY_OPTIONS) + page_size - 1) // page_size
     if pages > 1:
         nav = InlineKeyboardBuilder()
@@ -80,7 +80,6 @@ def categories_kb(page: int = 0, per_row: int = 2, page_size: int = 10):
         if page < pages - 1:
             nav.button(text="Вперёд ➡️", callback_data=f"page:{page+1}")
         nav.adjust(3)
-        # приклеиваем навигационный ряд в конец основной клавиатуры
         kb.row(*nav.buttons)
 
     return kb.as_markup()
@@ -159,6 +158,73 @@ def bar(value: float, max_value: float, width: int = 14) -> str:
     filled = max(0, min(width, filled))
     return "█" * filled + "░" * (width - filled)
 
+# ---------- Профиль /me (реальные данные из SQLite) ----------
+def get_user_profile(user_id: int):
+    with closing(db()) as conn:
+        # всего потрачено
+        row_total = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        total = float(row_total["t"] or 0)
+
+        # топ категория
+        row_top = conn.execute(
+            "SELECT category, SUM(amount) AS s FROM expenses "
+            "WHERE user_id=? GROUP BY category ORDER BY s DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if row_top:
+            raw = row_top["category"]
+            top_category = LABEL_BY_RAW.get(raw, raw)
+        else:
+            top_category = "—"
+
+        # сколько дней велись записи (distinct days)
+        row_days = conn.execute(
+            "SELECT COUNT(DISTINCT date(created_at)) AS d FROM expenses WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        days_total = int(row_days["d"] or 0)
+
+        # текущая серия (сколько дней подряд до сегодня были записи)
+        dates = conn.execute(
+            "SELECT DISTINCT date(created_at) AS d "
+            "FROM expenses WHERE user_id=? AND created_at>=? "
+            "ORDER BY d DESC",
+            (user_id, (datetime.now(tz=LOCAL_TZ) - timedelta(days=120)).isoformat()),
+        ).fetchall()
+
+    # считаем стрик
+    today = datetime.now(tz=LOCAL_TZ).date()
+    date_set = {datetime.fromisoformat(r["d"]).date() if "T" in r["d"] else datetime.strptime(r["d"], "%Y-%m-%d").date() for r in dates}
+    streak = 0
+    cur = today
+    while cur in date_set:
+        streak += 1
+        cur = cur - timedelta(days=1)
+
+    # среднее за день и за месяц
+    avg_per_day = round(total / days_total, 2) if days_total else 0.0
+    # последние 30 дней
+    with closing(db()) as conn:
+        row_30 = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) AS t FROM expenses "
+            "WHERE user_id=? AND created_at>=?",
+            (user_id, (datetime.now(tz=LOCAL_TZ) - timedelta(days=30)).isoformat()),
+        ).fetchone()
+    last30 = float(row_30["t"] or 0)
+    avg_30 = round(last30 / 30, 2)
+
+    return {
+        "total": total,
+        "top_category": top_category,
+        "days_total": days_total,
+        "streak": streak,
+        "avg_per_day": avg_per_day,
+        "avg_30": avg_30,
+    }
+
 # ---------- Хэндлеры ----------
 @router.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
@@ -198,6 +264,7 @@ async def cb_help(cb: CallbackQuery):
         "• /stats — выбор периода статистики\n"
         "• /export — выгрузка CSV\n"
         "• /reset_me — удалить только свои траты\n"
+        "• /me — мой профиль\n"
         "• /start — перезапуск приветствия"
     )
     await cb.message.answer(text, parse_mode="HTML", reply_markup=inline_main_menu())
@@ -229,6 +296,29 @@ async def myreset_confirm(cb: CallbackQuery):
     await cb.message.answer("🧹 Готово! Все твои траты удалены.", reply_markup=inline_main_menu())
     await cb.answer()
 
+# -------- /me ----------
+@router.message(Command("me"))
+async def me_cmd(message: Message):
+    p = get_user_profile(message.from_user.id)
+    compliments = [
+        "🦩 Ты ведёшь учёт как настоящая фламинго-икона 💖",
+        "💅 Финансы под контролем — ты буквально богиня бюджета ✨",
+        "🌸 Стильно, точно, без Excel-страданий 💕",
+        "🩵 Финансовый дзен достигнут, можно кофе ☕",
+    ]
+    msg = (
+        f"<b>🦩 Твой профиль Flamingo</b>\n\n"
+        f"💰 <b>Всего потрачено:</b> {p['total']:.2f}\n"
+        f"💫 <b>Любимая категория:</b> {p['top_category']}\n"
+        f"📅 <b>Дней с записями:</b> {p['days_total']}\n"
+        f"🔥 <b>Текущая серия:</b> {p['streak']} дней подряд\n"
+        f"➗ <b>Среднее/день:</b> {p['avg_per_day']:.2f}\n"
+        f"📆 <b>За 30 дней в среднем/день:</b> {p['avg_30']:.2f}\n\n"
+        f"{random.choice(compliments)}"
+    )
+    await message.answer(msg, parse_mode="HTML", reply_markup=inline_main_menu())
+
+# -------- Добавление трат --------
 @router.message(AddFlow.waiting_amount, F.text.regexp(r"^\d+([.,]\d+)?$"))
 async def got_amount(message: Message, state: FSMContext):
     amount = float(message.text.replace(",", "."))
@@ -244,14 +334,12 @@ async def got_amount(message: Message, state: FSMContext):
 async def must_number(message: Message):
     await message.answer("Отправь число, например: 390")
 
-# навигация по страницам категорий (редактирует ту же клавиатуру)
 @router.callback_query(F.data.startswith("page:"))
 async def page_cb(cb: CallbackQuery):
     page = int(cb.data.split(":", 1)[1])
     await cb.message.edit_reply_markup(reply_markup=categories_kb(page=page))
     await cb.answer()
 
-# глушилка для центральной кнопки "Стр. x/y"
 @router.callback_query(F.data == "noop")
 async def noop_cb(cb: CallbackQuery):
     await cb.answer()
@@ -278,11 +366,10 @@ async def picked_category(cb: CallbackQuery, state: FSMContext):
 
 def build_stats_text(title: str, total: float, rows):
     max_val = max((r["total"] or 0) for r in rows) or 1.0
-    label_by_raw = {raw: lbl for (lbl, raw) in CATEGORY_OPTIONS}
     lines = [f"📊 <b>{title}</b>\nИтого: <b>{total:g}</b>\n"]
     for r in rows:
         raw = r["category"]
-        lbl = label_by_raw.get(raw, raw)
+        lbl = LABEL_BY_RAW.get(raw, raw)
         val = float(r["total"] or 0)
         lines.append(f"{lbl} — {val:g}\n{bar(val, max_val)}")
     return "\n".join(lines)
@@ -320,6 +407,7 @@ async def set_commands_with_retry(bot: Bot):
         BotCommand(command="stats", description="Статистика"),
         BotCommand(command="export", description="Экспорт CSV"),
         BotCommand(command="start", description="Старт"),
+        BotCommand(command="me", description="Мой профиль 🦩"),
     ]
     for attempt in range(3):
         try:
