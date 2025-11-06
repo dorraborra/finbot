@@ -18,17 +18,20 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
+# при необходимости можно сменить часовой пояс на свой
 LOCAL_TZ = timezone(timedelta(hours=0))
 DB_PATH = os.getenv("DB_PATH", "finances.db")
 
-# (красивый лейбл, «чистое» имя для БД)
+# ---------- Категории ----------
+# первый элемент — красивый лейбл с эмодзи для интерфейса
+# второй элемент — "сырое" имя категории, которое хранится в базе
 CATEGORY_OPTIONS: List[Tuple[str, str]] = [
     ("🚬 Сигареты", "Сигареты"),
     ("☕ Кофе", "Кофе"),
     ("🛒 Продукты", "Продукты"),
     ("📦 Ozon", "Ozon"),
     ("🛍 WB", "WB"),
-    ("🍔 Жрала не дома", "Жрала не дома"),
+    ("🍔 Было лень готовить", "Жрала не дома"),  # <-- исправлено: лейбл, сырой ключ прежний
     ("💄 Beauty", "Beauty"),
     ("🧽 Бытовая химия", "Бытовая химия"),
     ("🚕 Такси", "Такси"),
@@ -41,8 +44,11 @@ CATEGORY_OPTIONS: List[Tuple[str, str]] = [
 ]
 RAW_CATEGORIES: List[str] = [r for _, r in CATEGORY_OPTIONS]
 
+# ---------- База данных ----------
 def db():
-    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; return conn
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
     with closing(db()) as conn, conn:
@@ -52,13 +58,15 @@ def init_db():
             "user_id INTEGER, amount REAL, category TEXT, created_at TEXT)"
         )
 
+# ---------- Клавиатуры ----------
 def inline_main_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Добавить", callback_data="menu:add")
     kb.button(text="📊 Статистика", callback_data="menu:stats")
     kb.button(text="📁 Экспорт CSV", callback_data="menu:export")
     kb.button(text="ℹ️ Помощь", callback_data="menu:help")
-    kb.adjust(2,2)
+    kb.button(text="🧹 Сбросить мои данные", callback_data="menu:reset")
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 def inline_categories(page: int = 0, per_row: int = 2, page_size: int = 10):
@@ -90,13 +98,13 @@ def stats_inline_kb():
     kb.adjust(3)
     return kb.as_markup()
 
+# ---------- FSM ----------
 class AddFlow(StatesGroup):
     waiting_amount = State()
     waiting_category = State()
 
 router = Router()
 
-# новое интро
 WELCOME = (
     "🦩 <b>Flamingo Money</b>\n"
     "Твой лёгкий учёт расходов: кидай сумму — я спрошу категорию и всё запишу.\n\n"
@@ -107,6 +115,7 @@ WELCOME = (
     "Выбери действие ниже:"
 )
 
+# ---------- Вспомогательные ----------
 def period_bounds(kind: str):
     now = datetime.now(tz=LOCAL_TZ)
     if kind == "today":
@@ -122,7 +131,8 @@ def period_bounds(kind: str):
         end = datetime(
             now.year + (1 if now.month == 12 else 0),
             1 if now.month == 12 else now.month + 1,
-            1, tzinfo=LOCAL_TZ
+            1,
+            tzinfo=LOCAL_TZ,
         )
         title = "Текущий месяц"
     return title, start, end
@@ -139,10 +149,14 @@ def fetch_stats(user_id: int, start: datetime, end: datetime):
     return total, rows
 
 def bar(value: float, max_value: float, width: int = 14) -> str:
-    if max_value <= 0: return "░" * width
+    if max_value <= 0:
+        return "░" * width
     filled = int(round((value / max_value) * width))
     filled = max(0, min(width, filled))
     return "█" * filled + "░" * (width - filled)
+
+# ---------- Хэндлеры ----------
+from aiogram.filters import CommandObject
 
 @router.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
@@ -181,25 +195,36 @@ async def cb_help(cb: CallbackQuery):
         "• /menu — главное меню\n"
         "• /stats — выбор периода статистики\n"
         "• /export — выгрузка CSV\n"
+        "• /reset_me — удалить только свои траты\n"
         "• /start — перезапуск приветствия"
     )
     await cb.message.answer(text, parse_mode="HTML", reply_markup=inline_main_menu())
     await cb.answer()
 
-@router.callback_query(F.data.startswith("page:"))
-async def cat_page(cb: CallbackQuery, state: FSMContext):
-    page = int(cb.data.split(":", 1)[1])
-    cats, nav = inline_categories(page=page)
-    await cb.message.edit_text("Выбери категорию:")
-    if nav:
-        await cb.message.edit_reply_markup(reply_markup=cats)
-        await cb.message.answer("Навигация:", reply_markup=nav)
-    else:
-        await cb.message.edit_reply_markup(reply_markup=cats)
+@router.callback_query(F.data == "menu:reset")
+async def menu_reset(cb: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Да, удалить только мои траты", callback_data="myreset:confirm")
+    kb.button(text="Отмена", callback_data="myreset:cancel")
+    kb.adjust(1)
+    await cb.message.answer(
+        "⚠️ Уверена, что хочешь удалить все свои записи?\n"
+        "Это действие <b>нельзя отменить</b>.",
+        parse_mode="HTML",
+        reply_markup=kb.as_markup(),
+    )
     await cb.answer()
 
-@router.callback_query(F.data == "noop")
-async def noop(cb: CallbackQuery):
+@router.callback_query(F.data == "myreset:cancel")
+async def myreset_cancel(cb: CallbackQuery):
+    await cb.message.answer("Отменено ✅", reply_markup=inline_main_menu())
+    await cb.answer()
+
+@router.callback_query(F.data == "myreset:confirm")
+async def myreset_confirm(cb: CallbackQuery):
+    with closing(db()) as conn, conn:
+        conn.execute("DELETE FROM expenses WHERE user_id=?", (cb.from_user.id,))
+    await cb.message.answer("🧹 Готово! Все твои траты удалены.", reply_markup=inline_main_menu())
     await cb.answer()
 
 @router.message(AddFlow.waiting_amount, F.text.regexp(r"^\d+([.,]\d+)?$"))
@@ -218,39 +243,23 @@ async def must_number(message: Message):
 
 @router.callback_query(AddFlow.waiting_category, F.data.startswith("pick:"))
 async def picked_category(cb: CallbackQuery, state: FSMContext):
-    try:
-        idx = int(cb.data.split(":", 1)[1])
-        label, raw = CATEGORY_OPTIONS[idx]
-    except Exception:
-        await cb.answer("Что-то пошло не так, попробуй ещё раз")
-        return
-
+    idx = int(cb.data.split(":", 1)[1])
+    label, raw = CATEGORY_OPTIONS[idx]
     data = await state.get_data()
     amount = data.get("amount")
-    if amount is None:
-        await cb.message.answer("Сначала отправь сумму", reply_markup=inline_main_menu())
-        await state.set_state(AddFlow.waiting_amount)
-        await cb.answer()
-        return
-
     with closing(db()) as conn, conn:
         conn.execute(
             "INSERT INTO expenses(user_id,amount,category,created_at) VALUES (?,?,?,?)",
-            (cb.from_user.id, amount, raw, datetime.now(tz=LOCAL_TZ).isoformat())
+            (cb.from_user.id, amount, raw, datetime.now(tz=LOCAL_TZ).isoformat()),
         )
-
     await cb.message.answer(
         f"✅ Записала: <b>{amount:g}</b> • {label}",
         parse_mode="HTML",
-        reply_markup=inline_main_menu()
+        reply_markup=inline_main_menu(),
     )
     await state.clear()
     await state.set_state(AddFlow.waiting_amount)
     await cb.answer()
-
-@router.message(Command("stats"))
-async def stats_cmd(message: Message):
-    await message.answer("Выбери период:", reply_markup=stats_inline_kb())
 
 def build_stats_text(title: str, total: float, rows):
     max_val = max((r["total"] or 0) for r in rows) or 1.0
@@ -276,7 +285,6 @@ async def stats_cb(cb: CallbackQuery):
 
 @router.message(Command("export"))
 async def export_csv(message: Message):
-    import os
     os.makedirs("exports", exist_ok=True)
     path = f"exports/{message.from_user.id}_export.csv"
     with closing(db()) as conn:
@@ -289,7 +297,9 @@ async def export_csv(message: Message):
         for r in rows:
             f.write(f"{r['amount']};{r['category']};{r['created_at']}\n")
     await message.answer_document(FSInputFile(path), caption="📁 CSV экспорт")
-async def set_commands_with_retry(bot):
+
+# ---------- Команды с ретраями ----------
+async def set_commands_with_retry(bot: Bot):
     cmds = [
         BotCommand(command="menu", description="Главное меню"),
         BotCommand(command="stats", description="Статистика"),
@@ -300,52 +310,21 @@ async def set_commands_with_retry(bot):
         try:
             await bot.set_my_commands(cmds, request_timeout=30)
             return
-        except TelegramNetworkError as e:
+        except TelegramNetworkError:
             wait = 2 * (attempt + 1)
             print(f"[set_my_commands] timeout, retry in {wait}s… ({attempt+1}/3)")
-            import asyncio
             await asyncio.sleep(wait)
     print("[set_my_commands] gave up after retries; continue without crashing")
 
+# ---------- Точка входа ----------
 async def main():
     init_db()
     bot = Bot(BOT_TOKEN)
     await set_commands_with_retry(bot)
-dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     print("Bot is running ✨")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-# ====== /reset_me: удалить ТОЛЬКО мои траты ======
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramNetworkError
-
-@router.message(Command("reset_me"))
-async def reset_me_ask(message: Message):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="❌ Да, удалить мои траты", callback_data="reset:confirm")
-    kb.button(text="Отмена", callback_data="reset:cancel")
-    kb.adjust(1)
-    await message.answer(
-        "⚠️ Уверена, что хочешь удалить все свои траты?\n"
-        "Это действие <b>нельзя отменить</b>.",
-        parse_mode="HTML",
-        reply_markup=kb.as_markup()
-    )
-
-@router.callback_query(F.data == "reset:cancel")
-async def reset_cancel(cb: CallbackQuery):
-    await cb.message.answer("Отменено ✅", reply_markup=inline_main_menu())
-    await cb.answer()
-
-@router.callback_query(F.data == "reset:confirm")
-async def reset_confirm(cb: CallbackQuery):
-    from contextlib import closing
-    with closing(db()) as conn, conn:
-        conn.execute("DELETE FROM expenses WHERE user_id=?", (cb.from_user.id,))
-    await cb.message.answer("🧹 Готово! Все твои траты удалены.", reply_markup=inline_main_menu())
-    await cb.answer()
-# ====== /reset_me конец ======
