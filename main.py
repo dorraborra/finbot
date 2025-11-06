@@ -43,6 +43,16 @@ CATEGORY_OPTIONS: List[Tuple[str, str]] = [
 RAW_CATEGORIES: List[str] = [r for _, r in CATEGORY_OPTIONS]
 LABEL_BY_RAW = {raw: label for (label, raw) in CATEGORY_OPTIONS}
 
+# ---------- ЦИТАТЫ после записи траты ----------
+QUOTES: List[str] = [
+    "🦩 Фламинго всё запомнила — порядок наведён 💖",
+    "💅 Деньги не исчезли, они переоделись в эмоции ✨",
+    "☕ Кофе — инвестиция в хорошее настроение!",
+    "🍔 Главное — было вкусно. Финансы под контролем 😎",
+    "📘 Записала. Маленькие шаги делают большую магию 🌸",
+    "🩵 Ты молодец! Учёт — это забота о себе 💫",
+]
+
 # ---------- База данных ----------
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -59,9 +69,6 @@ def init_db():
 
 # ---------- Клавиатуры ----------
 def categories_kb(page: int = 0, per_row: int = 2, page_size: int = 10):
-    """
-    ОДНА клавиатура: категории + ряд навигации внизу.
-    """
     start = page * page_size
     end = start + page_size
     slice_ = CATEGORY_OPTIONS[start:end]
@@ -158,17 +165,15 @@ def bar(value: float, max_value: float, width: int = 14) -> str:
     filled = max(0, min(width, filled))
     return "█" * filled + "░" * (width - filled)
 
-# ---------- Профиль /me (реальные данные из SQLite) ----------
+# ---------- Профиль /me ----------
 def get_user_profile(user_id: int):
     with closing(db()) as conn:
-        # всего потрачено
         row_total = conn.execute(
             "SELECT COALESCE(SUM(amount),0) AS t FROM expenses WHERE user_id=?",
             (user_id,),
         ).fetchone()
         total = float(row_total["t"] or 0)
 
-        # топ категория
         row_top = conn.execute(
             "SELECT category, SUM(amount) AS s FROM expenses "
             "WHERE user_id=? GROUP BY category ORDER BY s DESC LIMIT 1",
@@ -180,14 +185,12 @@ def get_user_profile(user_id: int):
         else:
             top_category = "—"
 
-        # сколько дней велись записи (distinct days)
         row_days = conn.execute(
             "SELECT COUNT(DISTINCT date(created_at)) AS d FROM expenses WHERE user_id=?",
             (user_id,),
         ).fetchone()
         days_total = int(row_days["d"] or 0)
 
-        # текущая серия (сколько дней подряд до сегодня были записи)
         dates = conn.execute(
             "SELECT DISTINCT date(created_at) AS d "
             "FROM expenses WHERE user_id=? AND created_at>=? "
@@ -195,7 +198,6 @@ def get_user_profile(user_id: int):
             (user_id, (datetime.now(tz=LOCAL_TZ) - timedelta(days=120)).isoformat()),
         ).fetchall()
 
-    # считаем стрик
     today = datetime.now(tz=LOCAL_TZ).date()
     date_set = {datetime.fromisoformat(r["d"]).date() if "T" in r["d"] else datetime.strptime(r["d"], "%Y-%m-%d").date() for r in dates}
     streak = 0
@@ -204,9 +206,7 @@ def get_user_profile(user_id: int):
         streak += 1
         cur = cur - timedelta(days=1)
 
-    # среднее за день и за месяц
     avg_per_day = round(total / days_total, 2) if days_total else 0.0
-    # последние 30 дней
     with closing(db()) as conn:
         row_30 = conn.execute(
             "SELECT COALESCE(SUM(amount),0) AS t FROM expenses "
@@ -355,11 +355,19 @@ async def picked_category(cb: CallbackQuery, state: FSMContext):
             "INSERT INTO expenses(user_id,amount,category,created_at) VALUES (?,?,?,?)",
             (cb.from_user.id, amount, raw, datetime.now(tz=LOCAL_TZ).isoformat()),
         )
+    # основное подтверждение
     await cb.message.answer(
         f"✅ Записала: <b>{amount:g}</b> • {label}",
         parse_mode="HTML",
         reply_markup=inline_main_menu(),
     )
+    # 💌 доп. реплика-цитата
+    try:
+        quote = random.choice(QUOTES)
+        await cb.message.answer(quote)
+    except Exception:
+        pass
+
     await state.clear()
     await state.set_state(AddFlow.waiting_amount)
     await cb.answer()
