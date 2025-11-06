@@ -289,7 +289,6 @@ async def export_csv(message: Message):
         for r in rows:
             f.write(f"{r['amount']};{r['category']};{r['created_at']}\n")
     await message.answer_document(FSInputFile(path), caption="📁 CSV экспорт")
-
 async def set_commands_with_retry(bot):
     cmds = [
         BotCommand(command="menu", description="Главное меню"),
