@@ -12,6 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, FSInputFile, BotCommand
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramNetworkError
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -289,16 +290,29 @@ async def export_csv(message: Message):
             f.write(f"{r['amount']};{r['category']};{r['created_at']}\n")
     await message.answer_document(FSInputFile(path), caption="📁 CSV экспорт")
 
-async def main():
-    init_db()
-    bot = Bot(BOT_TOKEN)
-    await bot.set_my_commands([
+async def set_commands_with_retry(bot):
+    cmds = [
         BotCommand(command="menu", description="Главное меню"),
         BotCommand(command="stats", description="Статистика"),
         BotCommand(command="export", description="Экспорт CSV"),
         BotCommand(command="start", description="Старт"),
-    ])
-    dp = Dispatcher(storage=MemoryStorage())
+    ]
+    for attempt in range(3):
+        try:
+            await bot.set_my_commands(cmds, request_timeout=30)
+            return
+        except TelegramNetworkError as e:
+            wait = 2 * (attempt + 1)
+            print(f"[set_my_commands] timeout, retry in {wait}s… ({attempt+1}/3)")
+            import asyncio
+            await asyncio.sleep(wait)
+    print("[set_my_commands] gave up after retries; continue without crashing")
+
+async def main():
+    init_db()
+    bot = Bot(BOT_TOKEN)
+    await set_commands_with_retry(bot)
+dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     print("Bot is running ✨")
     await dp.start_polling(bot)
@@ -308,6 +322,7 @@ if __name__ == "__main__":
 
 # ====== /reset_me: удалить ТОЛЬКО мои траты ======
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramNetworkError
 
 @router.message(Command("reset_me"))
 async def reset_me_ask(message: Message):
